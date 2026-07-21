@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "agentmemory": {
+      "command": "npx",
+      "args": ["-y", "@agentmemory/mcp"],
+      "env": {
+        "AGENTMEMORY_URL": "http://localhost:3111",
+        "AGENTMEMORY_SECRET": "",
+        "AGENTMEMORY_TOOLS": "all"
+      }
+    },
+    "scrapling": {
+      "command": "python",
+      "args": ["-c", "from scrapling.cli import main; main(['mcp'])"]
+    },
+    "kimi-research": {
+      "command": "python",
+      "args": ["C:\\Users\\aariz\\Kimi_HQ\\mcp_research_server.py"]
+    }
+  }
+}

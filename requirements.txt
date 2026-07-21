@@ -1,0 +1,5 @@
+mcp>=1.28.1
+httpx>=0.28.0
+scrapling>=0.4.11
+markdownify>=1.2.3
+ddgs>=9.14.4

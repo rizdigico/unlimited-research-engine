@@ -1,0 +1,3 @@
+[botdetection.ip_limit]
+# Disable token-based checks for local use
+link_token = false
