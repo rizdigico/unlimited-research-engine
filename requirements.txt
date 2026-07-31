@@ -1,5 +1,12 @@
+# Core runtime dependencies for the unlimited-research engine.
 mcp>=1.28.1
 httpx>=0.28.0
 scrapling>=0.4.11
 markdownify>=1.2.3
 ddgs>=9.14.4
+trafilatura>=2.0.0
+pypdf>=6.0.0
+
+# Optional but strongly recommended: JS rendering for heavy single-page apps.
+# Requires a Playwright browser: `playwright install chromium`
+crawl4ai>=0.9.0

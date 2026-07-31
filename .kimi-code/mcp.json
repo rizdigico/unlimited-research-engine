@@ -9,13 +9,9 @@
         "AGENTMEMORY_TOOLS": "all"
       }
     },
-    "scrapling": {
+    "unlimited-research": {
       "command": "python",
-      "args": ["-c", "from scrapling.cli import main; main(['mcp'])"]
-    },
-    "kimi-research": {
-      "command": "python",
-      "args": ["C:\\Users\\aariz\\Kimi_HQ\\mcp_research_server.py"]
+      "args": ["C:\\Users\\aariz\\kilo_HQ\\unlimited-research-engine\\engine\\mcp_research_server.py"]
     }
   }
 }

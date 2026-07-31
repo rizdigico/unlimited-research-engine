@@ -2,6 +2,7 @@ use_default_settings: true
 
 server:
   secret_key: "RZ1fPdnW6BhoaFHihrcdcSZSgcG1Tp"
+  limiter: false
 
 search:
   safe_search: 0
@@ -13,6 +14,13 @@ search:
 ui:
   static_use_hash: true
 
+outgoing:
+  request_timeout: 15.0
+  pool_connections: 100
+  pool_maxsize: 20
+
+# Engines enabled for the no-API research stack. All run without API keys.
+# More engines = wider coverage + more distributed request load.
 engines:
   - name: google
     engine: google
@@ -37,4 +45,32 @@ engines:
   - name: wikipedia
     engine: wikipedia
     shortcut: wp
+    disabled: false
+  - name: brave
+    engine: brave
+    shortcut: br
+    disabled: false
+  - name: mojeek
+    engine: mojeek
+    shortcut: mj
+    disabled: false
+  - name: yahoo
+    engine: yahoo
+    shortcut: yh
+    disabled: false
+  - name: presearch
+    engine: presearch
+    shortcut: ps
+    disabled: false
+  - name: google scholar
+    engine: google_scholar
+    shortcut: gs
+    disabled: false
+  - name: crossref
+    engine: crossref
+    shortcut: cr
+    disabled: false
+  - name: pubmed
+    engine: pubmed
+    shortcut: pm
     disabled: false
