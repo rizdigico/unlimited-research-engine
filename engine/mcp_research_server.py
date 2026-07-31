@@ -25,9 +25,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 from mcp.server import Server
+
+logger = logging.getLogger("research.mcp")
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
@@ -53,23 +56,23 @@ _TIME_RANGE = {
 }
 _NUM_RESULTS = {
     "type": "integer",
-    "default": 5,
+    "default": 15,
     "minimum": 1,
-    "maximum": 15,
-    "description": "Number of top results to fetch and scrape.",
+    "maximum": 200,
+    "description": "Number of top results to fetch and scrape (up to 200 for full web coverage).",
 }
 _NUM_URLS = {
     "type": "integer",
-    "default": 10,
+    "default": 20,
     "minimum": 1,
-    "maximum": 30,
-    "description": "Maximum number of URLs to return.",
+    "maximum": 200,
+    "description": "Maximum number of URLs to return (up to 200 for full web coverage).",
 }
 _MAX_LEN = {
     "type": "integer",
-    "default": 8000,
+    "default": 20000,
     "minimum": 500,
-    "maximum": 50000,
+    "maximum": 500000,
     "description": "Maximum characters of extracted content per page.",
 }
 _JS_RENDER = {
@@ -139,10 +142,20 @@ async def list_tools() -> list[Tool]:
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+    try:
+        return await _dispatch(name, arguments)
+    except ValueError as exc:
+        return [TextContent(type="text", text=json.dumps({"tool": name, "error": str(exc)}, indent=2, ensure_ascii=False))]
+    except Exception as exc:
+        logger.exception("tool=%s failed", name)
+        return [TextContent(type="text", text=json.dumps({"tool": name, "error": f"{type(exc).__name__}: {exc}"}, indent=2, ensure_ascii=False))]
+
+
+async def _dispatch(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     if name == "search_urls":
         result = await search_urls(
             arguments["query"],
-            arguments.get("num_results", 10),
+            arguments.get("num_results", 20),
             arguments.get("time_range", ""),
         )
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
@@ -151,7 +164,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         result = await scrape_url(
             arguments["url"],
             arguments.get("format", "markdown"),
-            arguments.get("max_content_length", 8000),
+            arguments.get("max_content_length", 20000),
             arguments.get("js_render", "auto"),
         )
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
@@ -159,8 +172,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     if name == "web_research":
         result = await deep_research(
             arguments["query"],
-            arguments.get("num_results", 5),
-            arguments.get("max_content_length", 8000),
+            arguments.get("num_results", 15),
+            arguments.get("max_content_length", 20000),
             arguments.get("time_range", ""),
             arguments.get("js_render", "auto"),
         )

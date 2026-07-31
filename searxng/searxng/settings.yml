@@ -1,7 +1,9 @@
 use_default_settings: true
 
 server:
-  secret_key: "RZ1fPdnW6BhoaFHihrcdcSZSgcG1Tp"
+  # Upstream placeholder: the container entrypoint replaces this with a freshly
+  # generated random key on every start. No real secret is committed.
+  secret_key: "ultrasecretkey"
   limiter: false
 
 search:
@@ -15,7 +17,7 @@ ui:
   static_use_hash: true
 
 outgoing:
-  request_timeout: 15.0
+  request_timeout: 8.0
   pool_connections: 100
   pool_maxsize: 20
 
@@ -58,9 +60,21 @@ engines:
     engine: yahoo
     shortcut: yh
     disabled: false
+  - name: yahoo news
+    engine: yahoo_news
+    shortcut: yhn
+    disabled: false
   - name: presearch
     engine: presearch
     shortcut: ps
+    disabled: false
+  - name: yep
+    engine: yep
+    shortcut: ye
+    disabled: false
+  - name: marginalia
+    engine: marginalia
+    shortcut: mg
     disabled: false
   - name: google scholar
     engine: google_scholar

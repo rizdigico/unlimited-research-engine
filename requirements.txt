@@ -1,7 +1,9 @@
 # Core runtime dependencies for the unlimited-research engine.
 mcp>=1.28.1
 httpx>=0.28.0
+h2>=4.0.0            # HTTP/2 for httpx (browser-like transport)
 scrapling>=0.4.11
+curl-cffi>=0.15.0    # TLS/HTTP2 fingerprint impersonation (via scrapling)
 markdownify>=1.2.3
 ddgs>=9.14.4
 trafilatura>=2.0.0

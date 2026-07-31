@@ -20,6 +20,7 @@ exponential-backoff retries, and optional proxy support.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import urllib.parse
 from typing import Any
@@ -51,6 +52,11 @@ except Exception as exc:  # pragma: no cover
     ScraplingFetcher = None
     SCRAPLING_AVAILABLE = False
     SCRAPLING_ERROR = str(exc)
+
+# Scrapling's Fetcher is built on curl_cffi; passing ``impersonate`` makes the
+# fast path speak real-browser TLS/HTTP2 fingerprints (JA3/JA4), which is what
+# defeats 403/bot walls that key on the client handshake.
+_SCRAPLING_IMPERSONATE = os.getenv("SCRAPLING_IMPERSONATE", "chrome")
 
 try:  # pragma: no cover - import guard
     from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
@@ -89,11 +95,16 @@ class CrawlerSession:
             if self._crawler is None:
                 if not CRAWL4AI_AVAILABLE:
                     raise RuntimeError(f"crawl4ai not available: {CRAWL4AI_ERROR}")
-                config = BrowserConfig(headless=True, verbose=False)
+                config = BrowserConfig(
+                    headless=True,
+                    verbose=False,
+                    enable_stealth=True,
+                    user_agent=DEFAULT_USER_ACTIVE_UA(),
+                )
                 self._crawler = AsyncWebCrawler(config=config)
                 await self._crawler.start()
                 self._started = time.monotonic()
-                logger.info("headless browser session started")
+                logger.info("headless browser session started (stealth enabled)")
         return self._crawler
 
     async def close(self) -> None:
@@ -162,6 +173,34 @@ async def _fetch_cascade(
             page = await _fetch_scrapling(url)
             content = ""
             title = ""
+
+            # Some PDFs are served without a .pdf URL (arXiv /pdf/xxxx paths).
+            # Detect them by Content-Type at the fetch layer so they take the
+            # fast pypdf route instead of crashing the browser tier.
+            if page and page.get("status") == 200 and page.get("pdf_bytes"):
+                text = extract_pdf_text(page["pdf_bytes"])
+                if text:
+                    return {
+                        "url": url,
+                        "status": 200,
+                        "title": _pdf_title(url),
+                        "content": truncate(text, max_len),
+                        "content_length": min(len(text), max_len),
+                        "method": "pdf",
+                        "error": None,
+                    }
+                # Binary PDF with no extractable text: never send it to the
+                # browser tier (Playwright aborts on "Download is starting").
+                return {
+                    "url": url,
+                    "status": 200,
+                    "title": _pdf_title(url),
+                    "content": "",
+                    "content_length": 0,
+                    "method": "pdf",
+                    "error": "pdf produced no extractable text",
+                }
+
             if page and page.get("status") == 200:
                 content = extract_content(page.get("html", ""), fmt, url)
                 title = page.get("title", "")
@@ -222,19 +261,59 @@ def _pdf_title(url: str) -> str:
 async def _fetch_pdf(url: str) -> tuple[str, int, str | None]:
     headers = {"User-Agent": DEFAULT_USER_ACTIVE_UA()}
     for attempt in range(FETCH_RETRIES + 1):
+        status = 0
+        last_error: Exception | None = None
+
+        # 1) HTTP/2 httpx attempt.
         try:
-            async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True, proxy=PROXY or None, headers=headers) as client:
+            async with httpx.AsyncClient(
+                timeout=FETCH_TIMEOUT,
+                follow_redirects=True,
+                proxy=PROXY or None,
+                headers=headers,
+                http2=True,
+            ) as client:
                 resp = await client.get(url)
             if resp.status_code == 200:
                 text = extract_pdf_text(resp.content)
                 if text:
                     return text, 200, None
                 return "", 200, "pdf produced no extractable text"
-            return "", resp.status_code, f"http {resp.status_code}"
+            status = resp.status_code
         except Exception as exc:
-            if attempt >= FETCH_RETRIES:
-                return "", 0, str(exc)
+            last_error = exc
+
+        # 2) TLS-impersonated curl_cffi attempt for CDN-protected PDFs.
+        try:
+            def _run() -> tuple[int, bytes]:
+                page = ScraplingFetcher.get(
+                    url,
+                    impersonate=_SCRAPLING_IMPERSONATE,
+                    stealthy_headers=True,
+                    follow_redirects=True,
+                    timeout=FETCH_TIMEOUT,
+                    proxy=PROXY or None,
+                )
+                return int(page.status), page.body or b""
+
+            fstatus, body = await asyncio.to_thread(_run)
+            if fstatus == 200 and body:
+                text = extract_pdf_text(body)
+                if text:
+                    return text, 200, None
+                return "", 200, "pdf produced no extractable text"
+            if status == 0:
+                status = fstatus
+        except Exception as exc:
+            last_error = exc
+
+        if attempt < FETCH_RETRIES:
             await asyncio.sleep(RETRY_BACKOFF * (attempt + 1))
+            continue
+        if status:
+            return "", status, f"http {status}"
+        return "", 0, str(last_error) if last_error else "pdf fetch failed"
+
     return "", 0, "pdf fetch failed"
 
 
@@ -245,10 +324,42 @@ async def _fetch_scrapling(url: str) -> dict[str, Any] | None:
     for attempt in range(FETCH_RETRIES + 1):
         try:
             def _run():
-                return ScraplingFetcher.get(url, stealthy_headers=True, follow_redirects=True, timeout=FETCH_TIMEOUT, proxy=PROXY or None)
+                try:
+                    return ScraplingFetcher.get(
+                        url,
+                        impersonate=_SCRAPLING_IMPERSONATE,
+                        stealthy_headers=True,
+                        follow_redirects=True,
+                        timeout=FETCH_TIMEOUT,
+                        proxy=PROXY or None,
+                    )
+                except TypeError:
+                    # Older scrapling without curl_cffi impersonation.
+                    return ScraplingFetcher.get(
+                        url,
+                        stealthy_headers=True,
+                        follow_redirects=True,
+                        timeout=FETCH_TIMEOUT,
+                        proxy=PROXY or None,
+                    )
 
             page = await asyncio.to_thread(_run)
             title = ""
+            content_type = ""
+            try:
+                content_type = (page.headers or {}).get("content-type", "")
+            except Exception:
+                pass
+            if "pdf" in content_type.lower() or (page.body or b"").startswith(b"%PDF"):
+                return {
+                    "url": url,
+                    "status": int(page.status),
+                    "title": "",
+                    "html": "",
+                    "pdf_bytes": page.body or b"",
+                    "method": "scrapling-pdf",
+                    "error": None,
+                }
             try:
                 title_tag = page.find("title")
                 if title_tag is not None:
@@ -278,7 +389,12 @@ async def _crawl_js(url: str, fmt: str, crawler_session: CrawlerSession | None) 
         own_session = False
     try:
         crawler = await crawler_session.crawler()
-        run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+        run_config = CrawlerRunConfig(
+            cache_mode=CacheMode.BYPASS,
+            magic=True,
+            max_retries=1,
+            wait_until="load",
+        )
         result = await crawler.arun(url, config=run_config)
         status = getattr(result, "status_code", 200)
         markdown = (

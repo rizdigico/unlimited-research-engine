@@ -15,8 +15,29 @@ from pathlib import Path
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8081")
 SEARXNG_TIMEOUT = float(os.getenv("SEARXNG_TIMEOUT", "25"))
 
+# SearXNG returns up to ~20-30 results per page; paginate across pages so a
+# single query can surface 200+ raw results before fusion/dedup. This is what
+# gives the engine its "full web coverage" behaviour — no artificial cap.
+SEARXNG_MAX_PAGES = int(os.getenv("SEARXNG_MAX_PAGES", "10"))
+SEARXNG_RESULTS_PER_PAGE = int(os.getenv("SEARXNG_RESULTS_PER_PAGE", "20"))
+SEARXNG_RETRIES = int(os.getenv("SEARXNG_RETRIES", "2"))
+
+# Hard upper bound per query (not a soft cap — the engine still fuses every
+# result the sources return, this just stops runaway requests from ever
+# hammering an upstream engine).
+MAX_RESULTS_PER_QUERY = int(os.getenv("SEARCH_MAX_RESULTS", "200"))
+
 DDGS_TIMEOUT = float(os.getenv("DDGS_TIMEOUT", "20"))
-DDGS_MAX_RESULTS = int(os.getenv("DDGS_MAX_RESULTS", "30"))
+DDGS_MAX_RESULTS = int(os.getenv("DDGS_MAX_RESULTS", "100"))
+
+# DuckDuckGo anti-abuse: rotate across API backends per query and keep a small
+# politeness interval between consecutive DDG calls so bursts don't get blocked.
+DDGS_BACKENDS = tuple(
+    b.strip()
+    for b in os.getenv("DDGS_BACKENDS", "duckduckgo,duckduckgo_lite,duckduckgo_html").split(",")
+    if b.strip()
+)
+DDGS_MIN_INTERVAL = float(os.getenv("DDGS_MIN_INTERVAL", "0.5"))
 
 # Which search sources participate in fusion, in priority order.
 SEARCH_SOURCES = tuple(
@@ -31,7 +52,7 @@ SEARCH_SOURCES = tuple(
 CACHE_DIR = Path(os.getenv("RESEARCH_CACHE_DIR", str(Path.home() / ".cache" / "unlimited-research")))
 SEARCH_CACHE_TTL = int(os.getenv("SEARCH_CACHE_TTL", "600"))  # seconds (10 min)
 FETCH_CACHE_TTL = int(os.getenv("FETCH_CACHE_TTL", "21600"))  # seconds (6 h)
-MAX_CACHE_ENTRIES = int(os.getenv("RESEARCH_CACHE_ENTRIES", "5000"))
+MAX_CACHE_ENTRIES = int(os.getenv("RESEARCH_CACHE_ENTRIES", "20000"))
 
 # ---------------------------------------------------------------------------
 # Fetch / scrape layer
@@ -57,8 +78,10 @@ PROXY = os.getenv("RESEARCH_PROXY", "")
 # ---------------------------------------------------------------------------
 # Resilience
 # ---------------------------------------------------------------------------
-CIRCUIT_FAIL_THRESHOLD = int(os.getenv("CIRCUIT_FAIL_THRESHOLD", "2"))
-CIRCUIT_COOLDOWN = float(os.getenv("CIRCUIT_COOLDOWN", "60"))
+# Generous breaker settings: a source must fail 3x consecutively to open, and
+# re-arms after 30s — transient blips never gate a source for long.
+CIRCUIT_FAIL_THRESHOLD = int(os.getenv("CIRCUIT_FAIL_THRESHOLD", "3"))
+CIRCUIT_COOLDOWN = float(os.getenv("CIRCUIT_COOLDOWN", "30"))
 
 # ---------------------------------------------------------------------------
 # Misc

@@ -29,9 +29,16 @@ from .cache import SEARCH_CACHE
 from .config import (
     CIRCUIT_COOLDOWN,
     CIRCUIT_FAIL_THRESHOLD,
+    DDGS_BACKENDS,
     DDGS_MAX_RESULTS,
+    DDGS_MIN_INTERVAL,
     DDGS_TIMEOUT,
+    MAX_RESULTS_PER_QUERY,
+    RETRY_BACKOFF,
     SEARCH_SOURCES,
+    SEARXNG_MAX_PAGES,
+    SEARXNG_RESULTS_PER_PAGE,
+    SEARXNG_RETRIES,
     SEARXNG_TIMEOUT,
     SEARXNG_URL,
     TIME_RANGE_MAP,
@@ -133,43 +140,121 @@ def _normalize_searxng_results(raw: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 async def search_searxng(query: str, num_results: int, time_range: str = "") -> list[dict[str, Any]]:
-    params: dict[str, Any] = {"format": "json", "q": query}
-    if time_range:
-        params["time_range"] = TIME_RANGE_MAP.get(time_range, time_range)
+    """Progressive paginated SearXNG search.
 
-    async with httpx.AsyncClient(timeout=SEARXNG_TIMEOUT, follow_redirects=True) as client:
-        resp = await client.get(f"{SEARXNG_URL}/search", params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        return _normalize_searxng_results(data.get("results", []))[:num_results]
+    Fetches ``pageno`` 1..N in parallel batches of 2 (N derived from
+    ``num_results`` and capped by ``SEARXNG_MAX_PAGES``) so one query can
+    surface 200+ raw results before fusion — full web coverage instead of a
+    single page of hits. Paging stops early as soon as a batch returns zero
+    results, so throttled engines are never hammered with pointless requests.
+    """
+    pages = max(1, min(SEARXNG_MAX_PAGES, (num_results + SEARXNG_RESULTS_PER_PAGE - 1) // SEARXNG_RESULTS_PER_PAGE))
+
+    async def _get_page(pageno: int) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"format": "json", "q": query, "pageno": pageno}
+        if time_range:
+            params["time_range"] = TIME_RANGE_MAP.get(time_range, time_range)
+        last_error: Exception | None = None
+        async with httpx.AsyncClient(timeout=SEARXNG_TIMEOUT, follow_redirects=True) as client:
+            for attempt in range(SEARXNG_RETRIES + 1):
+                try:
+                    resp = await client.get(f"{SEARXNG_URL}/search", params=params)
+                    resp.raise_for_status()
+                    return resp.json().get("results", [])
+                except Exception as exc:
+                    last_error = exc
+                    if attempt < SEARXNG_RETRIES:
+                        await asyncio.sleep(RETRY_BACKOFF * (attempt + 1))
+        raise last_error or RuntimeError("searxng page fetch failed")
+
+    page1 = await _get_page(1)
+    flat: list[dict[str, Any]] = list(page1)
+
+    # Continue paging in batches of 2 only while results keep arriving.
+    batch_size = 2
+    for start in range(2, pages + 1, batch_size):
+        batch_pages = list(range(start, min(start + batch_size, pages + 1)))
+        batch = await asyncio.gather(*(_get_page(p) for p in batch_pages))
+        got_any = any(batch)
+        flat.extend(item for page in batch for item in page)
+        if not got_any:
+            break
+
+    return _normalize_searxng_results(flat)[:num_results]
+
+
+# DuckDuckGo anti-abuse state: rotate backends per query and enforce a small
+# minimum interval between consecutive DDG calls so bursts don't get blocked.
+# A global lock serializes DDG traffic across concurrent workers, which is what
+# makes the interval actually hold under swarm load.
+_ddg_backend_idx = 0
+_last_ddg_at = 0.0
+_ddg_lock = asyncio.Lock()
 
 
 async def search_ddgs(query: str, num_results: int, time_range: str = "") -> list[dict[str, Any]]:
     if not DDGS_AVAILABLE:
         raise RuntimeError(f"ddgs not available: {DDGS_ERROR}")
 
-    def _run() -> list[dict[str, Any]]:
-        with DDGS(timeout=DDGS_TIMEOUT) as ddgs:
-            raw = list(ddgs.text(query, max_results=max(DDGS_MAX_RESULTS, num_results), timelimit=time_range or None))
-        out: list[dict[str, Any]] = []
-        for item in raw:
-            href = (item.get("href") or item.get("url") or "").strip()
-            if not href:
-                continue
-            out.append(
-                {
-                    "title": (item.get("title") or "").strip(),
-                    "href": href,
-                    "body": (item.get("body") or "").strip(),
-                    "engines": ["duckduckgo"],
-                    "score": 1.0,
-                    "publishedDate": item.get("date"),
-                    "source": "ddgs",
-                }
-            )
-        return out[:num_results]
+    global _ddg_backend_idx, _last_ddg_at
 
-    return await asyncio.to_thread(_run)
+    async with _ddg_lock:
+        # Politeness: never fire DDG requests back-to-back faster than the interval.
+        wait = DDGS_MIN_INTERVAL - (time.monotonic() - _last_ddg_at)
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        # Rotate through DDG backends so one rate-limited endpoint never blocks
+        # all DDG traffic; if the picked backend fails, fall back to another one.
+        backends = list(DDGS_BACKENDS) or ["duckduckgo"]
+        attempts = [DDGS_BACKENDS[_ddg_backend_idx % len(backends)] if DDGS_BACKENDS else "auto"]
+        _ddg_backend_idx += 1
+        for b in backends:
+            if b not in attempts:
+                attempts.append(b)
+
+        # ddgs caps at ~100 results per query — that is the library ceiling.
+        target = min(max(DDGS_MAX_RESULTS, num_results), MAX_RESULTS_PER_QUERY, DDGS_MAX_RESULTS)
+        last_error: Exception | None = None
+
+        for backend in attempts:
+            def _run(backend: str = backend) -> list[dict[str, Any]]:
+                with DDGS(timeout=DDGS_TIMEOUT) as ddgs:
+                    raw = list(
+                        ddgs.text(
+                            query,
+                            max_results=target,
+                            timelimit=time_range or None,
+                            backend=backend,
+                        )
+                    )
+                out: list[dict[str, Any]] = []
+                for item in raw:
+                    href = (item.get("href") or item.get("url") or "").strip()
+                    if not href:
+                        continue
+                    out.append(
+                        {
+                            "title": (item.get("title") or "").strip(),
+                            "href": href,
+                            "body": (item.get("body") or "").strip(),
+                            "engines": ["duckduckgo"],
+                            "score": 1.0,
+                            "publishedDate": item.get("date"),
+                            "source": "ddgs",
+                        }
+                    )
+                return out[:num_results]
+
+            try:
+                result = await asyncio.to_thread(_run)
+                _last_ddg_at = time.monotonic()
+                return result
+            except Exception as exc:
+                last_error = exc
+                logger.warning("ddgs backend=%s failed: %s", backend, exc)
+
+        raise last_error or RuntimeError("all ddgs backends failed")
 
 
 async def _search_single(

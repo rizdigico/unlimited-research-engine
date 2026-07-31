@@ -1,17 +1,20 @@
 # Unlimited No-API Web Research Engine
 
-A self-hosted, **no-API-key, rate-limit-resistant** deep research stack exposed
-as **one** MCP server (`unlimited-research`). Built for agents that need
-unlimited web research: search across many engines at once, then deep-scrape
-the best results — HTML, JavaScript-heavy SPAs, and PDFs.
+A self-hosted, **no-API-key, rate-limit-resistant, bot-detection-resistant**
+deep research stack exposed as **one** MCP server (`unlimited-research`). Built
+for agents that need unlimited web research: search across many engines at
+once, then deep-scrape the best results — HTML, JavaScript-heavy SPAs, and PDFs.
 
 - **Search** — local **SearXNG** meta-search + **DuckDuckGo**, queried in
-  parallel, fused, deduplicated by canonical URL, and interleaved by rank.
-  Circuit breakers + disk cache keep it fast and resilient.
-- **Scrape** — cascading fetchers: **Scrapling** (stealthy HTTP) →
-  **Crawl4AI / Playwright** (real headless browser for JS-heavy sites) →
-  **pypdf** (PDF documents), with retries, backoff, concurrency limits, and
-  optional proxy support.
+  parallel, paginated up to 10 pages per query, fused, deduplicated by
+  canonical URL, and interleaved by rank. Up to **200 results** per query with
+  no artificial cap. DDG backends rotate with a politeness interval so bursts
+  never trip anti-abuse.
+- **Scrape** — cascading fetchers: **Scrapling/curl_cffi** (real-browser TLS
+  fingerprint impersonation) → **Crawl4AI / Playwright** (stealth browser with
+  magic mode + anti-bot retries for JS-heavy/Cloudflare pages) → **pypdf**
+  (PDFs, including extensionless `/pdf/` URLs detected by Content-Type), with
+  retries, backoff, concurrency limits, and optional proxy support.
 - **Extract** — **trafilatura** readability extraction (tables kept, metadata
   included) with **markdownify** fallback.
 - **Diagnostics** — a built-in `engine_status` tool reports dependency health,
@@ -29,11 +32,12 @@ of that:
 
 1. A local **SearXNG** container fans every query across many free upstream
    search engines (Google, Bing, DuckDuckGo, Brave, Startpage, Qwant, Mojeek,
-   Yahoo, Presearch, Wikipedia, Crossref, PubMed, Google Scholar...).
-2. **DuckDuckGo** runs in parallel as a second independent source, so a
-   flapping SearXNG never stops research.
+   Yahoo, Presearch, Marginalia, Wikipedia, Crossref, PubMed, Google Scholar...).
+2. **DuckDuckGo** runs in parallel as a second independent source (with backend
+   rotation), so a flapping SearXNG never stops research.
 3. The best URLs are **deep-scraped** with a three-tier cascade that handles
-   static HTML, JS-heavy SPAs, and PDFs.
+   static HTML, JS-heavy SPAs, and PDFs — using browser-grade TLS/HTTP2
+   fingerprints and stealth rendering to get past 403/bot walls.
 4. Your client never talks to Google/Bing directly — SearXNG does, spreading
    the load and hiding your scraping activity from upstream engines.
 
@@ -57,14 +61,14 @@ tool surface: `web_research`, `search_urls`, `scrape_url`, `engine_status`.
 │       ├── config.py              # env-driven configuration
 │       ├── logging_utils.py       # stderr logger (keeps stdio clean)
 │       ├── cache.py               # thread-safe TTL disk cache
-│       ├── search.py              # SearXNG + DDGS fusion, circuit breaker
+│       ├── search.py              # SearXNG + DDGS fusion, pagination, breaker
 │       ├── fetch.py               # cascading fetchers (HTTP → JS → PDF)
 │       ├── extract.py             # trafilatura → markdownify → pypdf
 │       └── report.py              # final report shaping
 ├── searxng/
 │   ├── docker-compose.yml         # SearXNG container (with healthcheck)
 │   └── searxng/
-│       ├── settings.yml           # engine roster + tuning
+│       ├── settings.yml           # engine roster + tuning (no real secrets)
 │       └── limiter.toml           # bot-detection config for local use
 ├── skill/
 │   └── SKILL.md                   # agent skill card (unlimited-research)
@@ -78,7 +82,8 @@ tool surface: `web_research`, `search_urls`, `scrape_url`, `engine_status`.
 │   ├── test_report.py             # unit: report shaping
 │   ├── test_end_to_end.py         # live: real SearXNG + internet
 │   ├── mcp_e2e_check.py           # full MCP-protocol check over stdio
-│   └── stress_test.py             # heavy burst/swarm/endurance stress
+│   ├── stress_test.py             # burst/swarm/endurance stress (legacy)
+│   └── stress_test_unlimited.py   # 6-phase unlimited/anti-bot stress
 ├── scripts/
 │   └── engine_status.py           # CLI diagnostics
 └── docs/
@@ -166,16 +171,21 @@ Example `web_research`:
 
 1. **You send a query** to `web_research` (or `search_urls`).
 2. The engine queries **SearXNG** (`http://127.0.0.1:8081`) and **DuckDuckGo**
-   **in parallel**.
+   **in parallel** — SearXNG pages 1..10 in parallel per query, DDG rotates
+   across backends with a politeness interval.
 3. Results are **deduplicated** (canonicalized URLs) and **interleaved by rank**
-   across the sources that responded.
+   across the sources that responded — up to 200 per query.
 4. Per-source **circuit breakers** skip any source that keeps failing, so a
    broken SearXNG container never blocks research.
 5. For each URL, the engine runs the **fetch cascade**:
-   - PDF? → download bytes → pypdf → text.
-   - Else stealthy **Scrapling** fetch → trafilatura/markdownify extraction.
-   - Too little content (JS-heavy page)? → real headless browser via
-     **Crawl4AI/Playwright**, one shared browser session for the whole run.
+   - PDF? → download bytes (HTTP/2, with a TLS-impersonation fallback) → pypdf
+     → text. PDFs without a `.pdf` extension (e.g. arXiv `/pdf/…`) are
+     detected by `Content-Type`.
+   - Else **Scrapling/curl_cffi** fetch with real-browser TLS/HTTP2 fingerprint
+     impersonation (`impersonate="chrome"`) → trafilatura/markdownify extraction.
+   - Too little content, or an anti-bot page? → real headless browser via
+     **Crawl4AI/Playwright** with stealth patches + magic mode + anti-bot
+     retries, one shared browser session for the whole run.
 6. Results are cached on disk (10 min search, 6 h fetch) so repeat research is
    instant and upstream engines are never re-hit.
 7. You get a JSON report: `sources_used`, and per source — rank, title, URL,
@@ -188,18 +198,40 @@ engines instead of hammering one.
 
 ---
 
-## Why it avoids rate limits
+## Why it avoids rate limits & bot detection
+
+Search side:
 
 - **Distributed search** — SearXNG queries many engines in parallel; each
   engine sees only a fraction of your volume. DDGS adds an independent second
   channel.
 - **IP abstraction** — upstream engines see SearXNG's IP, not your host.
-- **Decoupled fetch** — Scrapling/Crawl4AI fetch pages directly from target
-  sites, separate from the search channel.
+- **DDG backend rotation** — DuckDuckGo calls alternate between the
+  `duckduckgo` and `duckduckgo_lite` backends with a configurable minimum
+  interval, so anti-abuse throttling on one endpoint never blocks all DDG
+  traffic.
+- **SearXNG page retries** — transient page failures are retried with backoff
+  before a source is ever marked down.
+
+Fetch side:
+
+- **TLS fingerprint impersonation** — the fast path speaks real Chrome
+  JA3/JA4 TLS and HTTP/2 fingerprints via curl_cffi (through Scrapling), which
+  is what defeats 403s keyed on the client handshake.
+- **Stealth browser tier** — Crawl4AI runs with `enable_stealth`, `magic`
+  mode, `max_retries`, and `wait_until="load"` so JS-challenged pages get
+  rendered like a real user session.
+- **Content-Type PDF detection** — PDFs served without a `.pdf` URL are routed
+  to the pypdf path instead of crashing the browser tier.
+- **HTTP/2 everywhere** — httpx PDF fetches negotiate HTTP/2 to match browser
+  behavior.
+
+Everywhere:
+
 - **Caching** — repeated queries and pages are served from disk, hitting the
   network zero times.
-- **Circuit breakers** — a failing source is temporarily skipped instead of
-  being hammered.
+- **Circuit breakers** — a source opens only after 3 consecutive failures and
+  re-arms after 30s, so transient blips never gate research for long.
 
 ---
 
@@ -212,18 +244,28 @@ Everything is overridable via environment variables. Full table in
 |---------|---------|---------|
 | `SEARXNG_URL` | `http://127.0.0.1:8081` | SearXNG instance |
 | `SEARCH_SOURCES` | `searxng,ddgs` | fused sources in priority order |
+| `SEARCH_MAX_RESULTS` | `200` | hard per-query bound (safety rail, not a cap) |
+| `SEARXNG_MAX_PAGES` | `10` | max SearXNG pages fetched per query |
+| `SEARXNG_RETRIES` | `2` | retries per SearXNG page before failure |
+| `DDGS_BACKENDS` | `duckduckgo,duckduckgo_lite` | DDG backends to rotate |
+| `DDGS_MIN_INTERVAL` | `0.5` | seconds between consecutive DDG calls |
+| `SCRAPLING_IMPERSONATE` | `chrome` | curl_cffi TLS fingerprint for the fast path |
 | `RESEARCH_JS_RENDER` | `auto` | `auto` / `always` / `never` browser tier |
 | `RESEARCH_CRAWL4AI` | `true` | enable/disable the browser tier |
 | `RESEARCH_CONCURRENCY` | `8` | max parallel page fetches |
 | `RESEARCH_CACHE_DIR` | `~/.cache/unlimited-research` | cache location |
 | `RESEARCH_PROXY` | *(empty)* | optional proxy for all fetches |
+| `CIRCUIT_FAIL_THRESHOLD` | `3` | consecutive failures before a source opens |
+| `CIRCUIT_COOLDOWN` | `30` | seconds a source stays open |
 
 ### SearXNG (`searxng/searxng/settings.yml`)
 
 Engines enabled (all key-free): google, bing, duckduckgo, startpage, qwant,
-wikipedia, brave, mojeek, yahoo, presearch, google scholar, crossref, pubmed.
-JSON format is enabled for the engine's JSON API. Edit, then
-`docker compose restart` in `searxng/`.
+brave, mojeek, yahoo, presearch, marginalia, wikipedia, google scholar,
+crossref, pubmed. JSON format is enabled for the engine's JSON API. The
+`secret_key` is the upstream `ultrasecretkey` placeholder — the container
+entrypoint replaces it with a fresh random key on every start, so no real
+secret is committed. Edit, then `docker compose restart` in `searxng/`.
 
 ---
 
@@ -239,23 +281,34 @@ python -m pytest -m live
 # full MCP-protocol E2E (spawns the real server, calls every tool over stdio)
 python tests/mcp_e2e_check.py
 
-# heavy stress: burst (all queries concurrent) + swarm (8 workers) + endurance
-python tests/stress_test.py
+# heavy unlimited stress — 6 phases:
+python tests/stress_test_unlimited.py
 ```
 
-The stress test covers hundreds of real page fetches across three phases and
-reports query success and page scrape success rates. Blocked pages (403,
-Cloudflare, anti-bot walls, dead domains) are expected real-world behavior and
-are surfaced per-result in the `error` field rather than failing the run.
+`stress_test_unlimited.py` proves the "no limits, no bot walls" claims:
+
+- **Phase A — coverage**: 6 queries × 200 results each (SearXNG paginated 10
+  pages + DDG), verifying volume and domain diversity.
+- **Phase B — mixed**: result sizes 20–50 with time-range filters.
+- **Phase C — swarm**: 6 concurrent workers × 3 queries each.
+- **Phase D — edge**: js_render always/never, extensionless PDF (arXiv),
+  Cloudflare-protected URL (must degrade gracefully, never crash), empty
+  query, invalid time_range, runaway `num_results` clamp.
+- **Phase E — cache**: identical results served from cache, faster than cold.
+- **Phase F — anti-bot**: rapid-fire scrapes of bot-protected/flaky sites —
+  every request must resolve to a clean result, never an uncaught exception.
+
+Blocked pages (403, Cloudflare, anti-bot walls, dead domains) are surfaced
+per-result in the `error` field rather than failing the run.
 
 ---
 
 ## Limitations (honest)
 
-- **Upstream blocking is unavoidable**: Reddit, some dictionary/news sites,
-  Zhihu, Cloudflare-protected pages, and anti-bot walls may return 403 or
-  empty content. This is the nature of scraping without paid APIs — the engine
-  reports it cleanly instead of failing.
+- **Some walls cannot be fully bypassed**: sites that issue JS-only challenges
+  requiring real interaction (some Cloudflare Turnstile, DataDome sessions),
+  login walls, and IP-reputation blocks may still return 403 or empty content.
+  The engine reports this cleanly instead of failing.
 - **Heavy volume from one IP** can still get SearXNG's engines blocked. For
   serious volume, add more engines or point `RESEARCH_PROXY` at a proxy
   rotation.

@@ -24,14 +24,46 @@ __all__ = [
     "fetch_url",
 ]
 
-DEFAULT_NUM_RESULTS = 5
-DEFAULT_MAX_LENGTH = 8000
-MAX_NUM_RESULTS = 15
-MAX_CONTENT_LENGTH = 50000
+DEFAULT_NUM_RESULTS = 15
+DEFAULT_MAX_LENGTH = 20000
+MAX_NUM_RESULTS = 200
+MAX_CONTENT_LENGTH = 500000
+
+_VALID_TIME_RANGES = {"", "d", "w", "m", "y"}
 
 
-async def search_urls(query: str, num_results: int = 10, time_range: str = "") -> dict[str, Any]:
+def _validate_query(query: str) -> str:
+    if not query or not query.strip():
+        raise ValueError("query must be a non-empty string")
+    return query.strip()
+
+
+def _clamp_results(num_results: int) -> int:
+    try:
+        return max(1, min(int(num_results), MAX_NUM_RESULTS))
+    except (TypeError, ValueError):
+        return DEFAULT_NUM_RESULTS
+
+
+def _clamp_length(max_content_length: int) -> int:
+    try:
+        return max(500, min(int(max_content_length), MAX_CONTENT_LENGTH))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_LENGTH
+
+
+def _validate_time_range(time_range: str) -> str:
+    time_range = (time_range or "").strip().lower()
+    if time_range not in _VALID_TIME_RANGES:
+        raise ValueError("time_range must be one of: '', 'd', 'w', 'm', 'y'")
+    return time_range
+
+
+async def search_urls(query: str, num_results: int = 20, time_range: str = "") -> dict[str, Any]:
     """Search only — return fused, deduped URL lists from all working sources."""
+    query = _validate_query(query)
+    num_results = _clamp_results(num_results)
+    time_range = _validate_time_range(time_range)
     results, sources_used = await search(query, num_results, time_range)
     return {"query": query, "sources_used": sources_used, "results": results}
 
@@ -43,6 +75,9 @@ async def scrape_url(
     js_render: str | None = None,
 ) -> dict[str, Any]:
     """Scrape a single URL through the full cascade."""
+    if not url or not url.strip():
+        raise ValueError("url must be a non-empty string")
+    max_content_length = _clamp_length(max_content_length)
     session = CrawlerSession()
     try:
         force_js = js_render is not None and js_render.strip().lower() == "always"
@@ -62,6 +97,10 @@ async def deep_research(
 ) -> dict[str, Any]:
     """Search + deep-scrape the top N results in one pass, sharing a single
     browser session across all fetches."""
+    query = _validate_query(query)
+    num_results = _clamp_results(num_results)
+    max_content_length = _clamp_length(max_content_length)
+    time_range = _validate_time_range(time_range)
     urls, sources_used = await search(query, num_results, time_range)
     force_js = js_render is not None and js_render.strip().lower() == "always"
 
@@ -137,6 +176,13 @@ async def engine_status() -> dict[str, Any]:
             "searxng_error": searxng_error,
             "js_render": JS_RENDER,
             "search_sources": list(_search.SEARCH_SOURCES),
+            "searxng_max_pages": _search.SEARXNG_MAX_PAGES,
+            "searxng_retries": _search.SEARXNG_RETRIES,
+            "ddgs_max_results": _search.DDGS_MAX_RESULTS,
+            "ddgs_backends": list(_search.DDGS_BACKENDS),
+            "max_results_per_query": _search.MAX_RESULTS_PER_QUERY,
+            "max_num_results": MAX_NUM_RESULTS,
+            "max_content_length": MAX_CONTENT_LENGTH,
         },
         "cache": {
             "search": SEARCH_CACHE.stats(),

@@ -48,8 +48,8 @@ Example `web_research`:
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `query` | string | required | Research topic or question. |
-| `num_results` | integer | 5 | Number of top URLs to fetch and scrape (1-15). |
-| `max_content_length` | integer | 8000 | Max chars of extracted content per page (500-50000). |
+| `num_results` | integer | 15 | Number of top URLs to fetch and scrape (1-200, unlimited coverage). |
+| `max_content_length` | integer | 20000 | Max chars of extracted content per page (500-500000). |
 | `time_range` | string | "" | `"d"`=day, `"w"`=week, `"m"`=month, `"y"`=year. |
 | `js_render` | string | "auto" | `auto`/`always`/`never` browser rendering. |
 
